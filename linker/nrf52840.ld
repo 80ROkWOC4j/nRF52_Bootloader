@@ -25,10 +25,13 @@ MEMORY
 
   /** RAM Region for bootloader. */
   /* Avoid conflict with NOINIT for OTA bond sharing */
-  RAM (rwx) :  ORIGIN = 0x20008010, LENGTH = 0x20040000-0x20008010
+  RAM (rwx) :  ORIGIN = 0x20008018, LENGTH = 0x20040000-0x20008018
 
   /* Written by the fault handler and read after the next reset; above the SoftDevice RAM, outside .data and .bss. */
   FAULT_RECORD (rwx) : ORIGIN = 0x20008000, LENGTH = 0x10
+
+  /* TOTEM DFU return marker, above SoftDevice RAM and the fault record. */
+  TOTEM_RESET (rwx) : ORIGIN = 0x20008010, LENGTH = 0x08
 
   /* Location for double reset detection, no init */
   DBL_RESET (rwx) :  ORIGIN = 0x20007F7C, LENGTH = 0x04
@@ -99,6 +102,11 @@ SECTIONS
   {
     KEEP(*(.fault_record))
   } > FAULT_RECORD
+
+  .totem_reset (NOLOAD) :
+  {
+    KEEP(*(.totem_reset))
+  } > TOTEM_RESET
 
   __sd_ram_end__ = ORIGIN(FAULT_RECORD);
 

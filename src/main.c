@@ -62,6 +62,12 @@
 #include "nrf_error.h"
 
 #include "boards.h"
+#ifdef TOTEM_RESET_OTA
+#include "reset_policy.h"
+// Kept outside SoftDevice RAM and startup-cleared .data/.bss.
+static volatile totem_reset_state_t totem_reset_state
+    __attribute__((section(".totem_reset")));
+#endif
 #include "ble_dfu_cfg.h"
 
 #include "pstorage_platform.h"
@@ -214,6 +220,10 @@ int main(void) {
     // clear in case we kept DFU_DBL_RESET_APP there
     (*dbl_reset_mem) = 0;
 
+#ifdef TOTEM_RESET_OTA
+    // Successful update or timeout: the next physical reset must enter OTA.
+    totem_reset_clear(&totem_reset_state);
+#endif
     // start application
     bootloader_app_start();
   }
@@ -290,6 +300,13 @@ static void ota_vbus_event(uint32_t soc_evt) {
 
 static void check_dfu_mode(void) {
   uint32_t const gpregret = NRF_POWER->GPREGRET;
+#ifdef TOTEM_RESET_OTA
+  uint32_t const reset_reason = NRF_POWER->RESETREAS;
+  // Pin reset clears GPREGRET2; only use the validated NOLOAD RAM record.
+  bool const was_in_dfu = totem_reset_consume_dfu(&totem_reset_state);
+  // W1C: do not let a previous pin reset contaminate a software reset.
+  NRF_POWER->RESETREAS = reset_reason;
+#endif
 
   // Start Bootloader in BLE OTA mode
   _ota_dfu = (gpregret == DFU_MAGIC_OTA_APPJUM) || (gpregret == DFU_MAGIC_OTA_RESET);
@@ -299,7 +316,11 @@ static void check_dfu_mode(void) {
   bool       uf2_dfu         = (gpregret == DFU_MAGIC_UF2_RESET);
   bool const dfu_skip        = (gpregret == DFU_MAGIC_SKIP);
 
+#ifdef TOTEM_RESET_OTA
+  bool const reason_reset_pin = (reset_reason & POWER_RESETREAS_RESETPIN_Msk) != 0;
+#else
   bool const reason_reset_pin = (NRF_POWER->RESETREAS & POWER_RESETREAS_RESETPIN_Msk) ? true : false;
+#endif
   bool const double_reset = ((*dbl_reset_mem) == DFU_DBL_RESET_MAGIC) && reason_reset_pin;
 
   // start either serial, uf2 or ble
@@ -381,6 +402,14 @@ static void check_dfu_mode(void) {
     (*dbl_reset_mem) = 0;
   }
 
+#ifdef TOTEM_RESET_OTA
+  // Keep double-reset and explicit USB/serial requests ahead of single reset.
+  if (totem_reset_enters_ota(reset_reason, was_in_dfu, valid_app, dfu_start)) {
+    dfu_start = true;
+    _ota_dfu = true;
+  }
+#endif
+
   // No valid app and a cable present: serve the UF2 drive instead of waiting for a phone.
   // Without a host the 3 s timeout below falls through to the OTA wait.
   // An OTA entry with a valid app takes the settled read too, only to seed the cable watch.
@@ -393,6 +422,11 @@ static void check_dfu_mode(void) {
 
   // Enter DFU mode accordingly to input
   if (dfu_start || !valid_app) {
+#ifdef TOTEM_RESET_OTA
+    // One reset cancels DFU if the application is still valid. Invalid apps
+    // stay in upstream recovery regardless of this marker.
+    totem_reset_mark_dfu(&totem_reset_state);
+#endif
     if (!valid_app) screen_set_title("NO FIRMWARE");
     if (_ota_dfu) {
       #ifdef BOARD_HAS_DISPLAY
@@ -502,6 +536,9 @@ static uint32_t ble_stack_init(void) {
 //--------------------------------------------------------------------+
 // The peer data and its CRC (dfu_ble_svc.c) occupy the first 0x40 bytes of NOINIT.
 STATIC_ASSERT(sizeof(dfu_ble_peer_data_t) + sizeof(uint16_t) <= 0x40);
+#ifdef TOTEM_RESET_OTA
+STATIC_ASSERT(sizeof(totem_reset_state_t) == 8);
+#endif
 STATIC_ASSERT(sizeof(fault_record_t) <= 0x10);
 fault_record_t g_fault_record __attribute__((section(".fault_record")));
 
